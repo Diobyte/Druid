@@ -84,7 +84,7 @@ on_render_menu(function ()
     menu.manual_play:render("Manual Play", "When enabled, disables automatic movement for melee spells - you control positioning manually")
     
     -- Evade compatibility (PREVENTS SPINNING/STUTTERING)
-    menu.disable_melee_movement_during_evade:render("Disable Melee Movement During Evade", "RECOMMENDED: ON - Prevents spinning/stuttering when evade detects ground AoE. Stops Druid from fighting evade script for movement control.")
+    menu.disable_melee_movement_during_evade:render("Stop Movement During Evade [ON = Evade Control, OFF = Script Control]", "RECOMMENDED: ON (checked) - When enabled, allows evade to control movement and prevents spinning/stuttering. When disabled, Druid script controls movement even during evade.")
     
     -- Weighted Targeting System menu
     if menu.weighted_targeting_tree:push("Weighted Targeting System") then
@@ -164,7 +164,10 @@ end)
 
 local cast_end_time = 0.0;
 local next_move_time = 0.0;  -- Timer to prevent spamming movement commands
+local last_movement_target_position = nil;  -- Track last movement destination
+local movement_stuck_counter = 0;  -- Detect if we're stuck spinning
 local spell_last_cast_times = {}  -- Per-spell internal cooldown tracking
+local evade_system_initialized = false;  -- Track if we've shown the evade system status
 
 local claw_buff_name = "legendary_druid_100"
 local claw_buff_name_hash = claw_buff_name
@@ -217,6 +220,17 @@ on_update(function ()
 
     if not my_utility.is_action_allowed() then
         return;
+    end
+    
+    -- One-time initialization message for evade system status
+    if not evade_system_initialized then
+        evade_system_initialized = true
+        local evade_protection_enabled = menu.disable_melee_movement_during_evade:get()
+        if evade_protection_enabled then
+            console.print("[DRUID] Evade System Integration: ENABLED ✓ - Smooth movement with danger avoidance")
+        else
+            console.print("[DRUID] Evade System Integration: DISABLED ✗ - WARNING: May cause spinning near ground AoE!")
+        end
     end
     
     -- Out of combat evade (faster exploration)
@@ -328,7 +342,30 @@ on_update(function ()
         
         -- If we have a valid prioritized list, use it to create categorized target data
         if prioritized_target_list and #prioritized_target_list > 0 then
-            -- Set movement target to the highest priority target (first in list)
+            -- CRITICAL: Filter out targets in dangerous zones BEFORE selecting best target
+            -- This prevents the target selector from repeatedly picking enemies standing in fire
+            if menu.disable_melee_movement_during_evade:get() then
+                local safe_targets = {}
+                for _, unit in ipairs(prioritized_target_list) do
+                    local unit_position = unit:get_position()
+                    local is_in_danger = evade.is_dangerous_position(unit_position)
+                    local path_dangerous = evade.is_position_passing_dangerous_zone(unit_position, player_position)
+                    
+                    -- Only include targets that are safe to approach
+                    if not is_in_danger and not path_dangerous then
+                        table.insert(safe_targets, unit)
+                    elseif menu.melee_debug_mode:get() then
+                        if is_in_danger then
+                            console.print("[MELEE DEBUG] Target selector filtered out enemy - standing in danger zone")
+                        elseif path_dangerous then
+                            console.print("[MELEE DEBUG] Target selector filtered out enemy - path crosses danger")
+                        end
+                    end
+                end
+                prioritized_target_list = safe_targets
+            end
+            
+            -- Set movement target to the highest priority target (first in filtered list)
             best_overall_target = prioritized_target_list[1]
             
             -- Filter the prioritized list into categorized lists for spell targeting
@@ -370,6 +407,35 @@ on_update(function ()
             collision_width,
             floor_height
         )
+        
+        -- CRITICAL: Filter out dangerous targets from all categorized lists
+        -- This prevents repeatedly targeting enemies in danger zones
+        if menu.disable_melee_movement_during_evade:get() then
+            local function filter_safe_targets(target_list)
+                local safe_list = {}
+                for _, unit in ipairs(target_list) do
+                    local unit_position = unit:get_position()
+                    local is_in_danger = evade.is_dangerous_position(unit_position)
+                    local path_dangerous = evade.is_position_passing_dangerous_zone(unit_position, player_position)
+                    
+                    if not is_in_danger and not path_dangerous then
+                        table.insert(safe_list, unit)
+                    end
+                end
+                return safe_list
+            end
+            
+            categorized_targets.all_melee = filter_safe_targets(categorized_targets.all_melee)
+            categorized_targets.visible_melee = filter_safe_targets(categorized_targets.visible_melee)
+            categorized_targets.all_ranged = filter_safe_targets(categorized_targets.all_ranged)
+            categorized_targets.visible_ranged = filter_safe_targets(categorized_targets.visible_ranged)
+            categorized_targets.all = filter_safe_targets(categorized_targets.all)
+            categorized_targets.visible_all = filter_safe_targets(categorized_targets.visible_all)
+            
+            if menu.melee_debug_mode:get() then
+                console.print("[MELEE DEBUG] Traditional targeting - filtered out dangerous targets from all lists")
+            end
+        end
 
         -- Generate target selector data for different categories
         all_melee_data = my_target_selector.get_target_selector_data(player_position, categorized_targets.all_melee)
@@ -479,12 +545,76 @@ on_update(function ()
         next_target_update_time = current_time + targeting_refresh_interval
     end
 
+    -- ============================================================
+    -- EVADE SYSTEM INTEGRATION - HOW IT WORKS
+    -- ============================================================
+    -- The "Stop Movement During Evade" checkbox controls whether this script cooperates with the evade script.
+    -- 
+    -- EVADE API FUNCTIONS USED:
+    --   • evade.is_dangerous_position(pos) - Returns true if the position is inside a danger zone (AoE spell)
+    --   • evade.is_position_passing_dangerous_zone(dest, source) - Returns true if path from source to dest crosses danger
+    --
+    -- FOUR-LAYER PROTECTION SYSTEM (when checkbox is ON/checked):
+    --
+    -- LAYER 0 - TARGET SELECTOR FILTERING (Line ~350 & ~410):
+    --   MOST IMPORTANT: Filter dangerous targets BEFORE they enter the target selection system.
+    --   This prevents the script from repeatedly picking the same dangerous enemy every frame.
+    --   Applies to both weighted and traditional targeting modes.
+    --   If target is in danger OR path crosses danger → Remove from target pool entirely
+    --   Result: Target selector only sees safe targets, automatically picks different enemy
+    --
+    -- LAYER 1 - GLOBAL TARGET FILTER (Line ~620):
+    --   Before starting rotation, check if the primary movement target is standing in danger.
+    --   If YES → Skip entire rotation cycle, let evade move us to safety
+    --   If NO → Continue with rotation
+    --
+    -- LAYER 2 - PER-SPELL TARGET FILTER (Line ~880):
+    --   For each melee spell about to be cast, check if that specific spell's target is in danger.
+    --   If YES → Skip this spell, try next spell in priority list
+    --   If NO → Continue with casting logic for this spell
+    --
+    -- LAYER 3 - MOVEMENT COMMAND INTELLIGENCE (Line ~910):
+    --   When movement is needed (target out of range), check THREE conditions:
+    --     a) Is player currently standing in danger? (let evade move us out first)
+    --     b) Is the destination (movement target) in danger? (don't walk into fire)
+    --     c) Would the path from player to destination cross danger? (don't walk through fire)
+    --   If ANY are true → Block movement command, let evade handle it
+    --   If ALL are false → Allow movement command
+    --
+    --   ANTI-SPAM PROTECTION:
+    --     - Track last movement destination (last_movement_target_position)
+    --     - Only send new command if destination changed by >1 yard OR stuck counter >10
+    --     - Movement interval: 0.5 seconds (prevents command spam that overrides evade)
+    --     - Reset tracking when: spell cast successful, target reached, or new target acquired
+    --
+    -- EXAMPLE SCENARIO - Enemy on fire patch:
+    --   1. Target selector picks enemy on fire as best target
+    --   2. Layer 1: evade.is_dangerous_position(enemy_pos) returns TRUE
+    --   3. Script skips entire rotation, prints "[MELEE DEBUG] Primary movement target is in dangerous zone"
+    --   4. Next frame: evade has (hopefully) picked different target OR moved us to better position
+    --   5. Layer 1 check passes, rotation continues
+    --
+    -- EXAMPLE SCENARIO - Path crosses fire:
+    --   1. Target is safe, but fire between us and target
+    --   2. Layer 1 & 2: Pass (target not in danger)
+    --   3. Spell out of range, need to move
+    --   4. Layer 3: evade.is_position_passing_dangerous_zone(target, player) returns TRUE
+    --   5. Movement blocked, prints "[MELEE DEBUG] movement blocked - path dangerous"
+    --   6. Evade system moves us around the fire
+    --   7. Next frame: Path clear, movement allowed
+    --
+    -- WHEN CHECKBOX IS OFF (unchecked):
+    --   All three layers are bypassed. Script always issues movement commands regardless of danger.
+    --   This causes "spinning" because: Script says "move forward" → Evade says "move back" → Script says "move forward"...
+    --
+    -- ============================================================
+    
     -- The movement target is always the best overall target
     local movement_target = best_overall_target
     local movement_target_position = movement_target:get_position()
     
-    -- CRITICAL ANTI-SPIN CHECK: If the primary movement target is in a dangerous zone,
-    -- skip the entire rotation cycle and let evade handle positioning
+    -- LAYER 1: GLOBAL TARGET FILTER
+    -- If the primary movement target is in a dangerous zone, skip the entire rotation cycle
     if menu.disable_melee_movement_during_evade:get() then
         local movement_target_in_danger = evade.is_dangerous_position(movement_target_position)
         if movement_target_in_danger then
@@ -751,8 +881,9 @@ on_update(function ()
                         local target_position = casting_target:get_position()
                         local distance = player_position:dist_to(target_position)
                         
-                        -- CRITICAL FIX: Skip spell entirely if target is in dangerous zone
-                        -- This prevents spinning when trying to approach targets in AoE
+                        -- LAYER 2: PER-SPELL TARGET FILTER
+                        -- Even if global target is safe, this specific spell's target might be in danger
+                        -- (example: AoE spell targeting cluster where one enemy is on fire)
                         if menu.disable_melee_movement_during_evade:get() then
                             local target_in_danger = evade.is_dangerous_position(target_position)
                             if target_in_danger then
@@ -777,9 +908,10 @@ on_update(function ()
                                 -- Auto movement mode: move towards the MOVEMENT TARGET (not casting target)
                                 local should_move = true
                                 
-                                -- Check evade compatibility setting
+                                -- LAYER 3: MOVEMENT COMMAND INTELLIGENCE
+                                -- This is the most critical layer - prevents spinning during transit
                                 if menu.disable_melee_movement_during_evade:get() then
-                                    -- CRITICAL FIX: Check if player is currently in danger (prevents spinning)
+                                    -- Check THREE danger conditions before allowing movement:
                                     local player_in_danger = evade.is_dangerous_position(player_position)
                                     local movement_position_dangerous = evade.is_dangerous_position(movement_target_position)
                                     local path_dangerous = evade.is_position_passing_dangerous_zone(movement_target_position, player_position)
@@ -799,17 +931,39 @@ on_update(function ()
                                 end
                                 
                                 if should_move and current_time >= next_move_time then
-                                    pathfinder.request_move(movement_target_position)
-                                    next_move_time = current_time + 0.2  -- Increased from 0.1 to 0.2 to reduce conflict
+                                    -- ANTI-SPIN: Check if we're trying to move to the same position repeatedly
+                                    local is_same_destination = false
+                                    if last_movement_target_position then
+                                        local position_distance = movement_target_position:dist_to(last_movement_target_position)
+                                        is_same_destination = position_distance < 1.0  -- Within 1 yard of last destination
+                                    end
                                     
-                                    if menu.melee_debug_mode:get() then
-                                        console.print("[MELEE DEBUG] " .. spell_name .. " moving to movement target - distance: " .. string.format("%.2f", distance) .. " > " .. string.format("%.2f", melee_spell_range))
+                                    -- Only send movement command if destination changed OR enough time passed
+                                    if not is_same_destination or movement_stuck_counter > 10 then
+                                        pathfinder.request_move(movement_target_position)
+                                        last_movement_target_position = movement_target_position
+                                        next_move_time = current_time + 0.5  -- Increased to 0.5s for less aggressive movement
+                                        movement_stuck_counter = 0
+                                        
+                                        if menu.melee_debug_mode:get() then
+                                            console.print("[MELEE DEBUG] " .. spell_name .. " moving to movement target - distance: " .. string.format("%.2f", distance) .. " > " .. string.format("%.2f", melee_spell_range))
+                                        end
+                                    else
+                                        -- Same destination, increment counter (might be stuck)
+                                        movement_stuck_counter = movement_stuck_counter + 1
+                                        if menu.melee_debug_mode:get() and movement_stuck_counter == 5 then
+                                            console.print("[MELEE DEBUG] " .. spell_name .. " same destination, waiting for evade/movement to complete")
+                                        end
                                     end
                                 end
                                 -- Skip casting this out-of-range spell and check the next one
                                 goto continue
                             end
                         end
+                        
+                        -- Reset movement tracking when in range (successful approach)
+                        last_movement_target_position = nil
+                        movement_stuck_counter = 0
                         
                         if menu.melee_debug_mode:get() then
                             console.print("[MELEE DEBUG] " .. spell_name .. " in range - distance: " .. string.format("%.2f", distance) .. " <= " .. string.format("%.2f", melee_spell_range))
@@ -822,6 +976,9 @@ on_update(function ()
                         cast_end_time = current_time + cooldown
                         -- Update internal cooldown tracking for this spell
                         spell_last_cast_times[spell_name] = current_time
+                        -- Reset movement tracking on successful cast
+                        last_movement_target_position = nil
+                        movement_stuck_counter = 0
                         return
                     end
                 end
