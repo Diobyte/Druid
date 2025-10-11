@@ -67,9 +67,6 @@ on_render_menu(function ()
         equipped_lookup[spell_id] = true
     end
     
-    -- Targeting Settings
-    menu.targeting_refresh_interval:render("Targeting Refresh Interval", "Time between target refresh checks in seconds (0.1-1.0) - Higher values improve performance", 1)
-    
     -- Cursor Targeting
     menu.cursor_targeting_enabled:render("Enable Cursor Targeting", "Enable cursor-based targeting for better manual control")
     if menu.cursor_targeting_enabled:get() then
@@ -193,9 +190,6 @@ local cached_target_data = nil
 local cached_target_data_time = 0
 local target_data_cache_duration = 0.05  -- Cache for 50ms
 
--- Targeting refresh timer
-local next_target_update_time = 0.0
-
 -- Cursor targeting variables
 local best_cursor_target = nil
 local closest_cursor_target = nil
@@ -237,10 +231,6 @@ on_update(function ()
     if spells.evade and spells.evade.out_of_combat then
         spells.evade.out_of_combat()
     end
-    
-    -- Check if we need to refresh targets based on interval
-    local targeting_refresh_interval = menu.targeting_refresh_interval:get()
-    local should_refresh_targets = current_time >= next_target_update_time
 
     local screen_range = 16.0;
     local player_position = get_player_position();
@@ -538,11 +528,6 @@ on_update(function ()
     -- If no valid target at all, exit
     if not best_overall_target then
         return;
-    end
-    
-    -- Update targeting refresh timer
-    if should_refresh_targets then
-        next_target_update_time = current_time + targeting_refresh_interval
     end
 
     -- ============================================================

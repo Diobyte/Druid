@@ -23,8 +23,6 @@ local menu_elements =
     -- ========================================
     -- TARGETING SYSTEM
     -- ========================================
-    targeting_refresh_interval = slider_float:new(0.1, 1.0, 0.2, get_hash(my_utility.plugin_label .. "targeting_refresh_interval")),
-    
     -- Cursor-based targeting (manual aim)
     cursor_targeting_enabled = checkbox:new(false, get_hash(my_utility.plugin_label .. "cursor_targeting_enabled")),
     cursor_targeting_radius = slider_float:new(0.1, 6.0, 3.0, get_hash(my_utility.plugin_label .. "cursor_targeting_radius")),
