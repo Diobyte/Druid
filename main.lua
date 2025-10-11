@@ -83,8 +83,8 @@ on_render_menu(function ()
     -- Manual Play Mode
     menu.manual_play:render("Manual Play", "When enabled, disables automatic movement for melee spells - you control positioning manually")
     
-    -- Evade compatibility
-    menu.disable_melee_movement_during_evade:render("Disable Melee Movement During Evade", "When enabled, prevents automatic melee movement when evade detects dangerous positions or paths")
+    -- Evade compatibility (PREVENTS SPINNING/STUTTERING)
+    menu.disable_melee_movement_during_evade:render("Disable Melee Movement During Evade", "RECOMMENDED: ON - Prevents spinning/stuttering when evade detects ground AoE. Stops Druid from fighting evade script for movement control.")
     
     -- Weighted Targeting System menu
     if menu.weighted_targeting_tree:push("Weighted Targeting System") then
@@ -482,6 +482,18 @@ on_update(function ()
     -- The movement target is always the best overall target
     local movement_target = best_overall_target
     local movement_target_position = movement_target:get_position()
+    
+    -- CRITICAL ANTI-SPIN CHECK: If the primary movement target is in a dangerous zone,
+    -- skip the entire rotation cycle and let evade handle positioning
+    if menu.disable_melee_movement_during_evade:get() then
+        local movement_target_in_danger = evade.is_dangerous_position(movement_target_position)
+        if movement_target_in_danger then
+            if menu.melee_debug_mode:get() then
+                console.print("[MELEE DEBUG] Primary movement target is in dangerous zone - skipping rotation cycle")
+            end
+            return;
+        end
+    end
 
     -- Perform area analysis with caching for AoE spell conditions
     local area_analysis
@@ -739,6 +751,18 @@ on_update(function ()
                         local target_position = casting_target:get_position()
                         local distance = player_position:dist_to(target_position)
                         
+                        -- CRITICAL FIX: Skip spell entirely if target is in dangerous zone
+                        -- This prevents spinning when trying to approach targets in AoE
+                        if menu.disable_melee_movement_during_evade:get() then
+                            local target_in_danger = evade.is_dangerous_position(target_position)
+                            if target_in_danger then
+                                if menu.melee_debug_mode:get() then
+                                    console.print("[MELEE DEBUG] " .. spell_name .. " skipped - target is standing in dangerous zone")
+                                end
+                                goto continue
+                            end
+                        end
+                        
                         if distance > melee_spell_range then
                             -- Target is out of range for melee spell
                             local manual_play_enabled = menu.manual_play:get()
@@ -755,13 +779,17 @@ on_update(function ()
                                 
                                 -- Check evade compatibility setting
                                 if menu.disable_melee_movement_during_evade:get() then
+                                    -- CRITICAL FIX: Check if player is currently in danger (prevents spinning)
+                                    local player_in_danger = evade.is_dangerous_position(player_position)
                                     local movement_position_dangerous = evade.is_dangerous_position(movement_target_position)
                                     local path_dangerous = evade.is_position_passing_dangerous_zone(movement_target_position, player_position)
                                     
-                                    if movement_position_dangerous or path_dangerous then
+                                    if player_in_danger or movement_position_dangerous or path_dangerous then
                                         should_move = false
                                         if menu.melee_debug_mode:get() then
-                                            if movement_position_dangerous then
+                                            if player_in_danger then
+                                                console.print("[MELEE DEBUG] " .. spell_name .. " movement blocked - player in dangerous area (letting evade handle it)")
+                                            elseif movement_position_dangerous then
                                                 console.print("[MELEE DEBUG] " .. spell_name .. " movement blocked - target position dangerous")
                                             elseif path_dangerous then
                                                 console.print("[MELEE DEBUG] " .. spell_name .. " movement blocked - path dangerous")
@@ -772,7 +800,7 @@ on_update(function ()
                                 
                                 if should_move and current_time >= next_move_time then
                                     pathfinder.request_move(movement_target_position)
-                                    next_move_time = current_time + 0.1  -- Prevent movement spam
+                                    next_move_time = current_time + 0.2  -- Increased from 0.1 to 0.2 to reduce conflict
                                     
                                     if menu.melee_debug_mode:get() then
                                         console.print("[MELEE DEBUG] " .. spell_name .. " moving to movement target - distance: " .. string.format("%.2f", distance) .. " > " .. string.format("%.2f", melee_spell_range))
