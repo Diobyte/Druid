@@ -658,7 +658,7 @@ local function get_weighted_target(source, scan_radius, min_targets, comparison_
             local original_weight = base_weight
             
             -- Check for damage resistance buff and vulnerable debuff
-            local buffs = unit:get_buffs()
+            local buffs = unit.get_buffs and unit:get_buffs() or {}
             local has_vulnerable_debuff = false
             local buff_modifications = {}
             for _, buff in ipairs(buffs) do
@@ -685,7 +685,7 @@ local function get_weighted_target(source, scan_radius, min_targets, comparison_
             end
             
             -- Check if unit is an infernal horde objective
-            local unit_name = unit:get_skin_name()
+            local unit_name = unit.get_skin_name and unit:get_skin_name() or ""
             for _, objective_name in ipairs(my_utility.horde_objectives) do
                 if unit_name:match(objective_name) and unit:get_current_health() > 1 then
                     base_weight = base_weight + horde_objective_weight

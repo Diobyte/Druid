@@ -9,7 +9,7 @@
 local spell_data_class = _G.spell_data
 
 -- Helper function to create spell data objects with standardized parameters
-local function create_spell_data(radius, range, cast_delay, projectile_speed, has_wall_collision, spell_id, geometry_type, targeting_type)
+local function create_spell_data(radius, range, cast_delay, projectile_speed, has_wall_collision, spell_id, geometry_type, targeting_type_param)
     return spell_data_class:new(
         radius,
         range,
@@ -18,7 +18,7 @@ local function create_spell_data(radius, range, cast_delay, projectile_speed, ha
         has_wall_collision,
         spell_id,
         geometry_type or spell_geometry.rectangular,
-        targeting_type or targeting_type.skillshot
+        targeting_type_param or targeting_type.skillshot
     )
 end
 

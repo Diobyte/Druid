@@ -3,6 +3,10 @@
 -- ============================================================
 -- Checks if the game's auto-play system is active and in combat mode
 -- This allows spells to be cast without requiring orbwalker input
+-- Default global flags for debug and orb override (set each frame in main)
+_G.__druid_debug__ = _G.__druid_debug__ or false
+_G.__druid_allow_any_orb_mode__ = _G.__druid_allow_any_orb_mode__ or false
+
 local function is_auto_play_enabled()
     local is_auto_play_active = auto_play.is_active();
     local auto_play_objective = auto_play.get_objective();
@@ -117,21 +121,25 @@ local function is_spell_allowed(spell_enable_check, next_cast_allowed_time, spel
     -- Respect global cast delay timer
     local current_time = get_time_since_inject();
     if current_time < next_cast_allowed_time then
+        if _G.__druid_debug__ then console.print("[DRUID DEBUG] Block: global cast delay active") end
         return false;
     end;
 
     -- Verify spell is off cooldown
     if utility.is_spell_ready and not utility.is_spell_ready(spell_id) then
+        if _G.__druid_debug__ then console.print("[DRUID DEBUG] Block: spell not ready " .. tostring(spell_id)) end
         return false;
     end
     
     -- Verify player has enough resources (spirit/fury)
     if utility.is_spell_affordable and not utility.is_spell_affordable(spell_id) then
+        if _G.__druid_debug__ then console.print("[DRUID DEBUG] Block: not enough resource for " .. tostring(spell_id)) end
         return false;
     end
 
     -- Additional cast validation (silenced, stunned, etc.)
     if not utility.can_cast_spell(spell_id) then
+        if _G.__druid_debug__ then console.print("[DRUID DEBUG] Block: utility.can_cast_spell=false") end
         return false;
     end;
 
@@ -140,19 +148,28 @@ local function is_spell_allowed(spell_enable_check, next_cast_allowed_time, spel
     if local_player then
         local player_position = local_player:get_position();
         if evade.is_dangerous_position(player_position) then
+            if _G.__druid_debug__ then console.print("[DRUID DEBUG] Block: player in dangerous position") end
             return false;
         end
     end
 
     -- Allow casting if auto-play is active and in combat mode
     if is_auto_play_enabled() then
+        if _G.__druid_debug__ then console.print("[DRUID DEBUG] Allow: auto-play combat mode") end
         return true;
     end
 
     -- Check orbwalker mode (must be PvP or Clear, not None)
     local current_orb_mode = orbwalker.get_orb_mode()
 
+    -- Allow override to cast in any orb mode (including none) when plugin enabled
+    if _G.__druid_allow_any_orb_mode__ then
+        if _G.__druid_debug__ then console.print("[DRUID DEBUG] Allow: orb-mode override active (mode=" .. tostring(current_orb_mode) .. ")") end
+        return true
+    end
+
     if current_orb_mode == orb_mode.none then
+        if _G.__druid_debug__ then console.print("[DRUID DEBUG] Block: orb mode none") end
         return false
     end
 
@@ -161,10 +178,12 @@ local function is_spell_allowed(spell_enable_check, next_cast_allowed_time, spel
 
     -- Require either PvP or Clear mode to be active
      if not is_current_orb_mode_pvp and not is_current_orb_mode_clear then
+        if _G.__druid_debug__ then console.print("[DRUID DEBUG] Block: orb mode not pvp/clear (mode=" .. tostring(current_orb_mode) .. ")") end
         return false;
     end
 
     -- All checks passed - spell is allowed to cast
+    if _G.__druid_debug__ then console.print("[DRUID DEBUG] Allow: all checks passed for spell " .. tostring(spell_id)) end
     return true
 
 end
@@ -226,6 +245,7 @@ function is_target_within_angle(origin, reference, target, max_angle)
     local to_reference = (reference - origin):normalize();
     local to_target = (target - origin):normalize();
     local dot_product = to_reference:dot(to_target);
+    if dot_product > 1 then dot_product = 1 elseif dot_product < -1 then dot_product = -1 end
     local angle = math.deg(math.acos(dot_product));
     return angle <= max_angle;
 end
@@ -337,12 +357,14 @@ local spell_delays = {
 
 
 -- Buff tracking utility function
+local buff_cache = require("my_utility/buff_cache")
+
 local function has_buff(unit, buff_id)
     if not unit then
         return false
     end
     
-    local buffs = unit:get_buffs()
+    local buffs = buff_cache.get(unit)
     if not buffs then
         return false
     end
@@ -362,7 +384,7 @@ local function get_buff_stacks(unit, buff_id, buff_type)
         return 0
     end
     
-    local buffs = unit:get_buffs()
+    local buffs = buff_cache.get(unit)
     if not buffs then
         return 0
     end
@@ -386,7 +408,7 @@ local function get_buff_remaining_time(unit, buff_id, buff_type)
         return 0
     end
     
-    local buffs = unit:get_buffs()
+    local buffs = buff_cache.get(unit)
     if not buffs then
         return 0
     end

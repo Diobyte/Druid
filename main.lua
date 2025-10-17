@@ -194,7 +194,10 @@ local target_data_cache_duration = 0.05  -- Cache for 50ms
 local best_cursor_target = nil
 local closest_cursor_target = nil
 
--- on_update callback
+-- Cached data for performance optimization
+local cached_target_selector_data = nil
+local cached_best_target = nil
+local cached_enemy_npcs = nil
 on_update(function ()
 
     local local_player = get_local_player();
@@ -206,6 +209,11 @@ on_update(function ()
         -- if plugin is disabled dont do any logic
         return;
     end;
+
+    -- Wire global debug flag and orb-mode override when plugin is enabled
+    _G.__druid_debug__ = menu.melee_debug_mode:get()
+    -- Allow casting in any orb mode when the plugin is enabled to avoid gating issues
+    _G.__druid_allow_any_orb_mode__ = true
 
     local current_time = get_time_since_inject()
     if current_time < cast_end_time then
@@ -234,6 +242,8 @@ on_update(function ()
 
     local screen_range = 16.0;
     local player_position = get_player_position();
+    local enemy_npcs = actors_manager.get_enemy_npcs()
+    cached_enemy_npcs = enemy_npcs
     local melee_range = my_utility.get_melee_range();  -- Use dynamic melee range
     local ranged_range = 12.0;
     local collision_width = 2.0;
@@ -361,16 +371,18 @@ on_update(function ()
             -- Filter the prioritized list into categorized lists for spell targeting
             local melee_list = {}
             local ranged_list = {}
+            local melee_range_sqr = melee_range * melee_range
+            local ranged_range_sqr = ranged_range * ranged_range
             
             for _, unit in ipairs(prioritized_target_list) do
                 local unit_position = unit:get_position()
-                local distance = player_position:dist_to(unit_position)
+                local distance_sqr = unit_position:squared_dist_to_ignore_z(player_position)
                 
                 -- Add to appropriate range category
-                if distance <= melee_range then
+                if distance_sqr <= melee_range_sqr then
                     table.insert(melee_list, unit)
                 end
-                if distance <= ranged_range then
+                if distance_sqr <= ranged_range_sqr then
                     table.insert(ranged_list, unit)
                 end
             end
@@ -468,6 +480,10 @@ on_update(function ()
         end
     end
     
+    -- Cache target data for on_render optimization
+    cached_target_selector_data = all_targets_data
+    cached_best_target = best_overall_target
+    
     -- Cursor Targeting (if enabled)
     if menu.cursor_targeting_enabled:get() and all_targets_data and all_targets_data.is_valid then
         local cursor_position = get_cursor_position()
@@ -481,11 +497,7 @@ on_update(function ()
         local closest_cursor_distance = math.huge
         
         -- Scan all targets for cursor targeting
-        local target_list = prioritized_target_list or {}
-        if not prioritized_target_list and all_targets_data.is_valid then
-            -- Build target list from all_targets_data if weighted targeting is off
-            target_list = actors_manager.get_enemy_npcs()
-        end
+        local target_list = prioritized_target_list or cached_enemy_npcs
         
         for _, unit in ipairs(target_list) do
             if unit and unit:is_enemy() and not unit:is_untargetable() and not unit:is_immune() then
@@ -527,6 +539,9 @@ on_update(function ()
 
     -- If no valid target at all, exit
     if not best_overall_target then
+        if menu.melee_debug_mode:get() then
+            console.print("[DRUID DEBUG] No valid target after selection; skipping rotation")
+        end
         return;
     end
 
@@ -864,7 +879,8 @@ on_update(function ()
                     if is_melee and casting_target and spell_data[spell_name].data then
                         local melee_spell_range = spell_data[spell_name].data.range
                         local target_position = casting_target:get_position()
-                        local distance = player_position:dist_to(target_position)
+                        local distance_sqr = target_position:squared_dist_to_ignore_z(player_position)
+                        local distance = math.sqrt(distance_sqr)  -- For debug logging
                         
                         -- LAYER 2: PER-SPELL TARGET FILTER
                         -- Even if global target is safe, this specific spell's target might be in danger
@@ -879,7 +895,7 @@ on_update(function ()
                             end
                         end
                         
-                        if distance > melee_spell_range then
+                        if distance_sqr > melee_spell_range * melee_spell_range then
                             -- Target is out of range for melee spell
                             local manual_play_enabled = menu.manual_play:get()
                             
@@ -919,8 +935,8 @@ on_update(function ()
                                     -- ANTI-SPIN: Check if we're trying to move to the same position repeatedly
                                     local is_same_destination = false
                                     if last_movement_target_position then
-                                        local position_distance = movement_target_position:dist_to(last_movement_target_position)
-                                        is_same_destination = position_distance < 1.0  -- Within 1 yard of last destination
+                                        local position_distance_sqr = movement_target_position:squared_dist_to_ignore_z(last_movement_target_position)
+                                        is_same_destination = position_distance_sqr < 1.0  -- Within 1 yard of last destination
                                     end
                                     
                                     -- Only send movement command if destination changed OR enough time passed
@@ -956,7 +972,14 @@ on_update(function ()
                     end
                     
                     -- Call spell's logics function with appropriate arguments
-                    local cast_successful, cooldown = spell.logics(unpack(params.args))
+                    -- Lua 5.1 safe dispatch (Druid spells expect 0 or 1 argument)
+                    local args = params.args or {}
+                    local cast_successful, cooldown
+                    if #args == 0 then
+                        cast_successful, cooldown = spell.logics()
+                    else
+                        cast_successful, cooldown = spell.logics(args[1])
+                    end
                     if cast_successful then
                         cast_end_time = current_time + cooldown
                         -- Update internal cooldown tracking for this spell
@@ -1014,62 +1037,12 @@ on_render(function ()
         end;
     end
 
-    local screen_range = 16.0;
-    local player_position = get_player_position();
-
-    local collision_table = { false, 2.0 };
-    local floor_table = { true, 5.0 };
-    local angle_table = { false, 90.0 };
-
-    local entity_list = my_target_selector.get_target_list(
-        player_position,
-        screen_range, 
-        collision_table, 
-        floor_table, 
-        angle_table);
-
-    local target_selector_data = my_target_selector.get_target_selector_data(
-        player_position, 
-        entity_list);
-
-    if not target_selector_data.is_valid then
+    if not cached_target_selector_data or not cached_target_selector_data.is_valid then
         return;
     end
- 
-    local is_auto_play_active = auto_play.is_active();
-    local max_range = 10.0;
-    if is_auto_play_active then
-        max_range = 12.0;
-    end
 
-    local best_target = target_selector_data.closest_unit;
-
-    if target_selector_data.has_elite then
-        local unit = target_selector_data.closest_elite;
-        local unit_position = unit:get_position();
-        local distance_sqr = unit_position:squared_dist_to_ignore_z(player_position);
-        if distance_sqr < (max_range * max_range) then
-            best_target = unit;
-        end        
-    end
-
-    if target_selector_data.has_boss then
-        local unit = target_selector_data.closest_boss;
-        local unit_position = unit:get_position();
-        local distance_sqr = unit_position:squared_dist_to_ignore_z(player_position);
-        if distance_sqr < (max_range * max_range) then
-            best_target = unit;
-        end
-    end
-
-    if target_selector_data.has_champion then
-        local unit = target_selector_data.closest_champion;
-        local unit_position = unit:get_position();
-        local distance_sqr = unit_position:squared_dist_to_ignore_z(player_position);
-        if distance_sqr < (max_range * max_range) then
-            best_target = unit;
-        end
-    end   
+    local target_selector_data = cached_target_selector_data
+    local best_target = cached_best_target
 
     if not best_target then
         return;
